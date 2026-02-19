@@ -1,0 +1,12 @@
+flask
+gunicorn
+torch
+open_clip_torch
+yt-dlp>=2024.03.10
+google-api-python-client
+python-dotenv
+moviepy==1.0.3
+numpy<2.0.0
+opencv-python-headless
+Pillow<10.0.0
+openai-whisper
