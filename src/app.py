@@ -22,6 +22,11 @@ with st.expander("🔌 API & service status (OpenAI / YouTube)", expanded=True):
     st.write(f"**YouTube (yt-dlp):** {'✅ ' if y_ok else '❌ '} {y_msg}")
     if not os.environ.get("YOUTUBE_API_KEY"):
         st.warning("⚠️ No YOUTUBE_API_KEY found. Search will be slow (scraping mode).")
+    try:
+        import vidgear
+        st.write(f"**VidGear:** ✅ Installed (Accelerated Processing)")
+    except ImportError:
+        st.write("**VidGear:** ❌ Not installed (Using standard OpenCV)")
 
 # --- Settings ---
 with st.sidebar:
@@ -59,6 +64,15 @@ with st.sidebar:
         eleven_voice = st.selectbox("ElevenLabs Voice", ["Adam", "Antoni", "Bella", "Josh", "Rachel"], index=0)
         
     add_subtitles = st.checkbox("Add subtitles from script", value=True)
+    auto_trim = st.checkbox("Auto-Trim (Sync to Narration)", value=False, help="Automatically cuts video clips to match the length of each sentence in the voiceover.")
+
+    st.subheader("Audio Settings")
+    bg_music_file = st.file_uploader("Background Music (Optional)", type=["mp3", "wav"])
+    bg_music_vol = st.slider("Music Volume (Ducking)", 0.0, 0.5, 0.1, 0.01, help="Volume of background music relative to voiceover (0.1 = 10%).")
+
+    st.subheader("Video Style")
+    transition_mode = st.radio("Transition Style", ["Smooth Crossfade (0.5s)", "Hard Cut (Fast)"], index=1, help="Hard Cut is faster to render and preferred for fast-paced videos.")
+    fade_dur = 0.5 if "Smooth" in transition_mode else 0.0
 
     st.subheader("AI Models")
     script_model = st.selectbox(
@@ -76,6 +90,23 @@ with st.sidebar:
 
     num_clips = max(1, (target_mins * 60) // segment_sec)
     st.caption(f"Will fetch up to **{num_clips}** clips (~{target_mins} min total).")
+
+# Save uploaded background music
+bg_music_path = None
+if bg_music_file:
+    os.makedirs(os.path.join("data", "audio"), exist_ok=True)
+    bg_music_path = os.path.abspath(os.path.join("data", "audio", "bg_music_temp.mp3"))
+    with open(bg_music_path, "wb") as f:
+        f.write(bg_music_file.getbuffer())
+
+with st.expander("🌿 Need inspiration? View Natural Prompts"):
+    st.markdown("""
+    - **Mountain:** Cinematic drone footage of the Swiss Alps, snow-capped peaks, green valleys.
+    - **Forest:** Sunlight filtering through a dense green forest (god rays), mossy trees, ferns.
+    - **Beach:** Vibrant sunset over a tropical beach, waves crashing on the sand, palm trees.
+    - **Desert:** Wide angle shot of red sand dunes in the desert, wind blowing sand.
+    - **Underwater:** Coral reef teeming with colorful fish, clear blue water, sunlight shafts.
+    """)
 
 prompt = st.text_input("Describe the scenes you want (or paste your idea):", "Cinematic views of ancient Rome")
 
@@ -125,8 +156,18 @@ if st.button("1. Plan & Fetch Scenes"):
             st.stop()
         
         clips_data = []
-        for i, scene_desc in enumerate(visual_plan):
-            st.write(f"🎞️ **Scene {i+1}/{num_clips}:** Searching for '{scene_desc[:50]}...'")
+        for i, scene_data in enumerate(visual_plan):
+            # Handle both old string format (if fallback occurs) and new dict format
+            if isinstance(scene_data, dict):
+                scene_desc = scene_data.get("desc", "Cinematic stock footage")
+                transition = scene_data.get("transition", "fade")
+                emotion = scene_data.get("emotion", "neutral")
+            else:
+                scene_desc = scene_data
+                transition = "fade"
+                emotion = "neutral"
+
+            st.write(f"🎞️ **Scene {i+1}/{num_clips}:** '{scene_desc[:40]}...' | 🧠 Mood: {emotion.upper()} | 🎬 FX: {transition}")
             links = get_youtube_links(scene_desc, limit=1)
             if not links:
                 st.warning(f"No result for scene {i+1}. (Check internet or set YOUTUBE_API_KEY)")
@@ -153,7 +194,14 @@ if st.button("1. Plan & Fetch Scenes"):
                         # Fallback to Local if Cloud failed or disabled
                         ts = analyze_frames(path, scene_desc, progress_callback=lambda p: prog_bar.progress(p, text=f"💻 Local Analysis: {int(p*100)}%"))
                     
-                    clips_data.append({"path": path, "start": ts, "name": os.path.basename(path), "desc": scene_desc, "url": links[0]})
+                    clips_data.append({
+                        "path": path, 
+                        "start": ts, 
+                        "name": os.path.basename(path), 
+                        "desc": scene_desc, 
+                        "url": links[0],
+                        "transition": transition
+                    })
                     st.write(f"✔️ Matched at {ts:.1f}s")
                 prog_bar.empty()
             except Exception as e:
@@ -214,52 +262,74 @@ if st.session_state.doc_state == "review":
             render_cloud = st.form_submit_button("☁️ Render on Cloud (GPU)")
 
     if render_local or render_cloud:
-        doc_audio = st.session_state.doc_data.get("audio")
-        subs = script_for_video.strip() if add_subtitles and script_for_video.strip() else None
-        
-        if render_cloud and enable_runpod:
-            st.info("🚀 Sending render job to RunPod RTX 4090...")
-            # Prepare segments for cloud (needs URL)
-            cloud_segments = [{"url": c.get("url"), "start": c["start"]} for c in edited_clips if c.get("url")]
+        success = False
+        try:
+            doc_audio = st.session_state.doc_data.get("audio")
+            subs = script_for_video.strip() if add_subtitles and script_for_video.strip() else None
+            # Pass the 3-part tuple: path, start_time, transition
+            winning_segments = [(c["path"], c["start"], c.get("transition", "fade")) for c in edited_clips]
+            srt_path = os.path.abspath(os.path.join("data", "output", "documentary_subtitles.srt"))
             
-            vid_bytes, err = render_video_on_cloud(cloud_segments, doc_audio, subs)
-            if vid_bytes:
-                final_path = os.path.join("data", "output", "cloud_render.mp4")
-                with open(final_path, "wb") as f: f.write(vid_bytes)
-                st.success("✅ Cloud Render Complete!")
+            if render_cloud and enable_runpod:
+                st.info("🚀 Sending render job to RunPod RTX 4090...")
+                # Prepare segments for cloud (needs URL)
+                cloud_segments = [{"url": c.get("url"), "start": c["start"]} for c in edited_clips if c.get("url")]
+                
+                vid_bytes, err = render_video_on_cloud(cloud_segments, doc_audio, subs)
+                if vid_bytes:
+                    final_path = os.path.join("data", "output", "cloud_render.mp4")
+                    with open(final_path, "wb") as f: f.write(vid_bytes)
+                    st.success("✅ Cloud Render Complete!")
+                else:
+                    st.error(f"Cloud Render Failed: {err}")
+                    st.stop()
             else:
-                st.error(f"Cloud Render Failed: {err}")
-                st.stop()
-        else:
-            st.write("🛠️ **Rendering locally...**")
-            winning_segments = [(c["path"], c["start"]) for c in edited_clips]
-            final_path = trim_final_video(winning_segments, audio_path=doc_audio, segment_length_sec=segment_sec, subtitle_text=subs,
-                                          crop_headers=True, mute_original=True, fade_duration=0.5)
-            st.success("✅ Documentary complete!")
-            
-        if os.path.exists(final_path):
-            # Cleanup raw files
-            st.write("🧹 **Cleaning up raw files...**")
-            for path, _ in winning_segments:
-                if os.path.exists(path):
-                    try: os.remove(path)
-                    except: pass
-            
-            st.session_state.doc_state = "idle" # Reset
-            
-            st.divider()
-            st.write(f"**Final Output:** `{final_path}`")
-            st.video(final_path)
-            safe_name = "".join(c for c in st.session_state.doc_data.get("source_text", "doc") if c.isalnum() or c in " -_").strip()[:30]
-            with open(final_path, "rb") as f:
-                st.download_button("💾 Download Documentary MP4", f, file_name=f"vidrush_{safe_name}.mp4", key="dl_doc_final")
-
+                st.write("🛠️ **Rendering locally...**")
+                final_path = trim_final_video(winning_segments, audio_path=doc_audio, segment_length_sec=segment_sec, subtitle_text=subs,
+                                              crop_headers=True, mute_original=True, fade_duration=fade_dur, save_srt_path=srt_path, 
+                                              sync_to_audio=auto_trim, bg_music_path=bg_music_path, bg_music_volume=bg_music_vol)
+                st.success("✅ Documentary complete!")
+                
+            if os.path.exists(final_path):
+                # Cleanup raw files
+                st.write("🧹 **Cleaning up raw files...**")
+                for seg in winning_segments:
+                    path = seg[0]
+                    if os.path.exists(path):
+                        try: os.remove(path)
+                        except: pass
+                
+                st.session_state.doc_final_video = final_path
+                st.session_state.doc_state = "complete"
+                success = True
         except Exception as e:
-        st.error(f"Stitching failed: {e}")
+            st.error(f"Stitching failed: {e}")
+        
+        if success:
+            st.rerun()
+
+if st.session_state.doc_state == "complete":
+    st.divider()
+    st.subheader("🍿 Final Documentary Ready")
+    final_path = st.session_state.doc_final_video
+    doc_audio = st.session_state.doc_data.get("audio")
+    srt_path = os.path.abspath(os.path.join("data", "output", "documentary_subtitles.srt"))
+    
+    st.write(f"**Location:** `{final_path}`")
+    st.video(final_path)
+    
+    safe_name = "".join(c for c in st.session_state.doc_data.get("source_text", "doc") if c.isalnum() or c in " -_").strip()[:30]
+    
+    with open(final_path, "rb") as f:
+        st.download_button("💾 Download Video (MP4)", f, file_name=f"vidrush_{safe_name}.mp4", key="dl_doc_final", mime="video/mp4")
+    
+    if st.button("🔄 Start New Documentary"):
+        st.session_state.doc_state = "idle"
+        st.rerun()
 
 
 st.divider()
-st.subheader("📹 Generate Video (multi-clip from search)")
+st.subheader(" Generate Video (multi-clip from search)")
 
 if "gen_vid_state" not in st.session_state:
     st.session_state.gen_vid_state = "idle" # idle, review
@@ -427,12 +497,19 @@ if st.session_state.gen_vid_state == "review":
         if not winning_segments:
             st.error("No segments to stitch.")
             st.stop()
+        success = False
         try:
+            srt_path = os.path.abspath(os.path.join("data", "output", "video_subtitles.srt"))
             final_path = trim_final_video(
                 winning_segments,
                 audio_path=audio_path,
                 segment_length_sec=segment_sec,
                 subtitle_text=script_for_video.strip() if add_subtitles and script_for_video.strip() else None,
+                save_srt_path=srt_path,
+                fade_duration=fade_dur,
+                sync_to_audio=auto_trim,
+                bg_music_path=bg_music_path,
+                bg_music_volume=bg_music_vol
             )
             if not os.path.exists(final_path):
                 st.error(f"Video file was not created at: {final_path}")
@@ -446,19 +523,31 @@ if st.session_state.gen_vid_state == "review":
                         try: os.remove(file)
                         except: pass
                 
-                # Reset state
-                st.session_state.gen_vid_state = "idle"
-                
-                st.divider()
-                st.write(f"**Output file:** `{final_path}`")
-                st.video(final_path)
-                safe_name = "".join(c for c in st.session_state.gen_vid_data.get("prompt", "video") if c.isalnum() or c in " -_").strip()[:30]
-                with open(final_path, "rb") as f:
-                    st.download_button("💾 Download MP4", f, file_name=f"vidrush_{safe_name}.mp4")
+                st.session_state.gen_vid_final_video = final_path
+                st.session_state.gen_vid_state = "complete"
+                success = True
 
         except Exception as e:
             st.error(f"Could not create final video: {e}")
             st.stop()
+        
+        if success:
+            st.rerun()
+
+if st.session_state.gen_vid_state == "complete":
+    st.divider()
+    st.subheader("🍿 Final Video Ready")
+    final_path = st.session_state.gen_vid_final_video
+    st.write(f"**Location:** `{final_path}`")
+    st.video(final_path)
+    
+    safe_name = "".join(c for c in st.session_state.gen_vid_data.get("prompt", "video") if c.isalnum() or c in " -_").strip()[:30]
+    with open(final_path, "rb") as f:
+        st.download_button("💾 Download MP4", f, file_name=f"vidrush_{safe_name}.mp4", key="dl_gen_final", mime="video/mp4")
+        
+    if st.button("🔄 Create Another Video"):
+        st.session_state.gen_vid_state = "idle"
+        st.rerun()
 
 # --- NEW SECTION: Upload & Analyze ---
 st.divider()

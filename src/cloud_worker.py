@@ -12,13 +12,13 @@ runpod.api_key = os.getenv("RUNPOD_API_KEY")
 
 def ping_runpod():
     """Checks if the RunPod Pod is reachable."""
-    pod_id = os.getenv("RUNPOD_POD_ID", "tx1n5nqj29goku")
+    pod_id = os.getenv("RUNPOD_POD_ID", "60m4obatnbnwgy")
     if not pod_id or pod_id.startswith("your_"):
         return False, "POD_ID not set in .env"
     
     api_url = f"https://{pod_id}-8000.proxy.runpod.net/health"
     try:
-        response = requests.get(api_url, timeout=3)
+        response = requests.get(api_url, timeout=15)
         if response.status_code == 200:
             return True, "Online"
         if response.status_code == 502:
@@ -32,7 +32,7 @@ def render_video_on_cloud(segments, audio_path, subtitle_text):
     Sends the Edit Decision List to the Pod for rendering.
     segments: list of {'url': str, 'start': float}
     """
-    pod_id = os.getenv("RUNPOD_POD_ID", "tx1n5nqj29goku")
+    pod_id = os.getenv("RUNPOD_POD_ID", "60m4obatnbnwgy")
     if not pod_id: return None, "POD_ID not set"
     
     api_url = f"https://{pod_id}-8000.proxy.runpod.net/render"
@@ -61,7 +61,7 @@ def run_task_on_cloud(video_url=None, prompt=None, file_path=None):
     Supports both Direct Pod Connection and Serverless Endpoint.
     """
     # --- OPTION 1: Direct Pod Connection (Persistent GPU) ---
-    pod_id = os.getenv("RUNPOD_POD_ID", "tx1n5nqj29goku")
+    pod_id = os.getenv("RUNPOD_POD_ID", "60m4obatnbnwgy")
     if pod_id and not pod_id.startswith("your_"):
         # Construct the proxy URL for the pod (Port 8000)
         # Format: https://{pod_id}-8000.proxy.runpod.net
@@ -110,10 +110,10 @@ def run_task_on_cloud(video_url=None, prompt=None, file_path=None):
                             elif status == "failed":
                                 return {"error": job_data.get("error", "Unknown error")}
                         
-                        time.sleep(2)
+                        time.sleep(5)
                     except Exception as e:
                         print(f"⚠️ Polling error: {e}")
-                        time.sleep(2)
+                        time.sleep(5)
                 return {"error": "Polling timed out"}
             
             return data
@@ -141,3 +141,32 @@ def run_task_on_cloud(video_url=None, prompt=None, file_path=None):
     except Exception as e:
         print(f"❌ Cloud Error: {e}")
         return None
+
+def cleanup_cloud_files():
+    """Deletes temporary files on the Pod."""
+    import os
+    import requests
+    pod_id = os.getenv("RUNPOD_POD_ID")
+    api_url = f"https://{pod_id}-8000.proxy.runpod.net/cleanup"
+    try:
+        res = requests.post(api_url, timeout=10)
+        return res.status_code == 200, res.json()
+    except Exception as e:
+        return False, str(e)
+
+def terminate_runpod():
+    """Safety function to stop billing."""
+    import os
+    import requests
+    api_key = os.getenv("RUNPOD_API_KEY")
+    pod_id = os.getenv("RUNPOD_POD_ID")
+    if not api_key or not pod_id:
+        return False, "Keys missing"
+    
+    url = f"https://api.runpod.io/v2/pod/{pod_id}/terminate"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        res = requests.post(url, headers=headers)
+        return res.status_code == 200, res.text
+    except Exception as e:
+        return False, str(e)

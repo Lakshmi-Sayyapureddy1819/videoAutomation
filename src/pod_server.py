@@ -3,7 +3,7 @@ Run this script INSIDE your RunPod GPU Pod.
 It listens for requests from your local Streamlit app.
 
 Commands:
-- On RunPod (Linux): gunicorn -w 1 -b 0.0.0.0:8000 --timeout 1000 pod_server:app
+- On RunPod (Linux): python3 -m gunicorn -w 2 -k gevent -b 0.0.0.0:8000 --timeout 1500 pod_server:app
 - On Local Windows:  python src/pod_server.py
 """
 from flask import Flask, request, jsonify
@@ -15,12 +15,13 @@ import uuid
 import time
 import os
 import sys
+import json
+import yt_dlp
 
 # Ensure we can import from the same directory
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from scout import download_video
-from processor import analyze_frames
+from processor import analyze_frames, trim_final_video
 
 app = Flask(__name__)
 
@@ -32,21 +33,63 @@ model = model.to(device).eval()
 print("✅ Model Ready.")
 print("🎧 VidRush Pipeline Ready: /health, /analyze, /cleanup, /render (Whisper+GPU)")
 
-# --- JOB QUEUE (Simple In-Memory) ---
-JOBS = {}
+# --- JOB QUEUE (File-Based for Multi-Worker Support) ---
+JOB_DIR = "/tmp/vidrush_jobs"
+os.makedirs(JOB_DIR, exist_ok=True)
+
+def save_job(job_id, data):
+    with open(os.path.join(JOB_DIR, f"{job_id}.json"), "w") as f:
+        json.dump(data, f)
+
+def get_job(job_id):
+    path = os.path.join(JOB_DIR, f"{job_id}.json")
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return None
+
+def download_video_direct(url, output_dir="/tmp/raw_videos"):
+    """Self-contained download function to avoid dependency on scout.py"""
+    os.makedirs(output_dir, exist_ok=True)
+    ydl_opts = {
+        'format': 'best[ext=mp4]/best',
+        'outtmpl': os.path.join(output_dir, '%(id)s.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'nopart': True,
+        'extractor_args': {'youtube': {'player_client': ['android', 'ios']}},
+    }
+    
+    # Inject PO Token if available in Pod Environment
+    po_token = os.getenv("YOUTUBE_PO_TOKEN")
+    if po_token:
+        ydl_opts['extractor_args']['youtube']['po_token'] = [po_token]
+        if os.getenv("YOUTUBE_VISITOR_DATA"):
+            ydl_opts['extractor_args']['youtube']['visitor_data'] = [os.getenv("YOUTUBE_VISITOR_DATA")]
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            return ydl.prepare_filename(info)
+    except Exception as e:
+        print(f"Download error: {e}")
+        return None
 
 def background_analyze(job_id, url, prompt, video_path, model, preprocess, device):
     """Runs analysis in background to avoid Cloudflare 524 timeouts."""
     try:
-        JOBS[job_id]['status'] = 'processing'
+        job = get_job(job_id)
+        job['status'] = 'processing'
+        save_job(job_id, job)
         
         # 1. Download (if URL provided and no path yet)
         if url and not video_path:
-            video_path = download_video(url)
+            video_path = download_video_direct(url)
             
         if not video_path or not os.path.exists(video_path):
-             JOBS[job_id]['status'] = 'failed'
-             JOBS[job_id]['error'] = "Download/Upload failed"
+             job['status'] = 'failed'
+             job['error'] = "Download/Upload failed"
+             save_job(job_id, job)
              return
 
         # 2. Analyze
@@ -54,25 +97,29 @@ def background_analyze(job_id, url, prompt, video_path, model, preprocess, devic
         
         # 3. Cleanup
         if os.path.exists(video_path):
-            os.remove(video_path)
+            try: os.remove(video_path)
+            except: pass
             
-        JOBS[job_id]['status'] = 'completed'
-        JOBS[job_id]['timestamp'] = timestamp
+        job['status'] = 'completed'
+        job['timestamp'] = timestamp
+        save_job(job_id, job)
         print(f"✅ Job {job_id} finished: {timestamp}s")
         
     except Exception as e:
         import traceback
         traceback.print_exc()
-        JOBS[job_id]['status'] = 'failed'
-        JOBS[job_id]['error'] = str(e)
+        job = get_job(job_id)
+        job['status'] = 'failed'
+        job['error'] = str(e)
+        save_job(job_id, job)
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "running"}), 200
+    return jsonify({"status": "running", "gpu": torch.cuda.is_available()}), 200
 
 @app.route('/status/<job_id>', methods=['GET'])
 def job_status(job_id):
-    job = JOBS.get(job_id)
+    job = get_job(job_id)
     if not job: return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
 
@@ -104,7 +151,8 @@ def analyze():
     
     # Start Async Job
     job_id = str(uuid.uuid4())
-    JOBS[job_id] = {'status': 'queued', 'submitted_at': time.time()}
+    job_data = {'status': 'queued', 'submitted_at': time.time()}
+    save_job(job_id, job_data)
     
     thread = threading.Thread(target=background_analyze, args=(job_id, url, prompt, video_path, model, preprocess, device))
     thread.start()
@@ -116,12 +164,12 @@ def cleanup():
     """Deletes temporary video files to free up space."""
     removed_count = 0
     # Check both /tmp and the raw_videos subdir
-    dirs_to_clean = ["/tmp", "/tmp/raw_videos"]
+    dirs_to_clean = ["/tmp", "/tmp/raw_videos", JOB_DIR]
     
     for d in dirs_to_clean:
         if os.path.exists(d):
             for f in os.listdir(d):
-                if f.endswith((".mp4", ".mov", ".avi", ".mkv")):
+                if f.endswith((".mp4", ".mov", ".avi", ".mkv", ".json")):
                     try: os.remove(os.path.join(d, f)); removed_count += 1
                     except: pass
     return jsonify({"status": "cleaned", "files_removed": removed_count})
@@ -158,7 +206,7 @@ def render():
             url = seg.get('url')
             start = float(seg.get('start', 0))
             if url:
-                path = download_video(url)
+                path = download_video_direct(url)
                 if path: local_segments.append((path, start))
         
         if not local_segments: return jsonify({"error": "No segments processed"}), 400

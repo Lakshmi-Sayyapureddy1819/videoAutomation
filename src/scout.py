@@ -10,11 +10,13 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if platform.system() == "Windows":
     RAW_VIDEOS_DIR = os.path.join(_PROJECT_ROOT, "data", "raw_videos")
 else:
-    # Linux/RunPod: Use /tmp for faster IO and to avoid permission issues
-    RAW_VIDEOS_DIR = "/tmp/raw_videos"
+    # Change from /tmp to workspace for persistence
+    RAW_VIDEOS_DIR = "/workspace/data/raw_videos"
 
 load_dotenv()
 API_KEY = os.getenv("YOUTUBE_API_KEY")
+
+USED_VIDEO_IDS = []
 
 def get_youtube_links(query, limit=2):
     """Search YouTube via API (preferred) or yt-dlp fallback."""
@@ -35,7 +37,12 @@ def get_youtube_links(query, limit=2):
                 videoLicense="creativeCommon"
             )
             res = request.execute()
-            links = [f"https://www.youtube.com/watch?v={i['id']['videoId']}" for i in res.get('items', [])]
+            links = []
+            for i in res.get('items', []):
+                vid_id = i['id']['videoId']
+                if vid_id not in USED_VIDEO_IDS:
+                    USED_VIDEO_IDS.append(vid_id)
+                    links.append(f"https://www.youtube.com/watch?v={vid_id}")
             
             # FALLBACK: If CC finds nothing, search all videos
             if not links:
@@ -47,7 +54,11 @@ def get_youtube_links(query, limit=2):
                     type="video"
                 )
                 res = request.execute()
-                links = [f"https://www.youtube.com/watch?v={i['id']['videoId']}" for i in res.get('items', [])]
+                for i in res.get('items', []):
+                    vid_id = i['id']['videoId']
+                    if vid_id not in USED_VIDEO_IDS:
+                        USED_VIDEO_IDS.append(vid_id)
+                        links.append(f"https://www.youtube.com/watch?v={vid_id}")
             
             if links:
                 return links
@@ -79,7 +90,9 @@ def get_youtube_links(query, limit=2):
         for e in entries[:limit]:
             vid_id = e.get("id") or e.get("url", "").strip().split("watch?v=")[-1].split("&")[0]
             if vid_id:
-                links.append(f"https://www.youtube.com/watch?v={vid_id}")
+                if vid_id not in USED_VIDEO_IDS:
+                    USED_VIDEO_IDS.append(vid_id)
+                    links.append(f"https://www.youtube.com/watch?v={vid_id}")
         return links
     except Exception as e:
         print(f"❌ Search failed for '{query}': {e}")
@@ -124,6 +137,7 @@ def download_video(url, progress_callback=None):
         'noplaylist': True,
         'quiet': False,
         'no_warnings': False,
+        'nopart': True,
         'socket_timeout': 30,
         'retries': 5,
         'merge_output_format': 'mp4',
@@ -134,6 +148,15 @@ def download_video(url, progress_callback=None):
         'extractor_args': {'youtube': {'player_client': ['android', 'ios']}},
     }
     
+    # Inject PO Token if available (Fixes 403/Bot detection)
+    po_token = os.getenv("YOUTUBE_PO_TOKEN")
+    if po_token:
+        if 'youtube' not in base_opts['extractor_args']:
+            base_opts['extractor_args']['youtube'] = {}
+        base_opts['extractor_args']['youtube']['po_token'] = [po_token]
+        if os.getenv("YOUTUBE_VISITOR_DATA"):
+            base_opts['extractor_args']['youtube']['visitor_data'] = [os.getenv("YOUTUBE_VISITOR_DATA")]
+
     # Optional: Use cookies.txt if present in project root
     cookies_path = os.path.join(_PROJECT_ROOT, "cookies.txt")
     if os.path.exists(cookies_path):
@@ -141,8 +164,8 @@ def download_video(url, progress_callback=None):
     
     # Strategies: 1. Optimized 720p (Fast/Small), 2. Robust Fallback (Any quality)
     strategies = [
-        'best[height<=720][ext=mp4]/best[ext=mp4]/best',
-        'bestvideo+bestaudio/best'
+        'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
+        'best[height<=480][ext=mp4]/best'
     ]
 
     for i, fmt in enumerate(strategies):
