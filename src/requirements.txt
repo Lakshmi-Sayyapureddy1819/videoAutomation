@@ -1,19 +1,32 @@
+# --- Web & Infrastructure ---
 streamlit
 flask
 gunicorn
-torch
-open_clip_torch
-yt-dlp>=2024.03.10
-google-api-python-client
 python-dotenv
-moviepy==1.0.3
-numpy<2.0.0
-opencv-python-headless
-Pillow<10.0.0
-openai-whisper
-vidgear
-openai
-elevenlabs
-runpod
 requests
 gevent
+
+# --- AI & Vision (RTX 4090 Optimized) ---
+torch
+torchvision
+torchaudio
+open_clip_torch
+transformers
+openai-whisper
+openai
+faiss-gpu           # Required for your Vector Database logic
+
+# --- Search & Stock APIs ---
+google-api-python-client
+elevenlabs
+runpod
+
+# --- Video Processing (Stable Versions) ---
+moviepy==1.0.3      # DO NOT change; 2.0+ breaks TextClip for many users
+yt-dlp>=2024.03.10
+vidgear
+opencv-python-headless
+numpy<2.0.0         # Critical: MoviePy and Torch 2.2+ are not yet fully compatible with Numpy 2.0
+Pillow<10.0.0       # Required for MoviePy's TextClip rendering compatibility
+imageio==2.33.1     # Best match for MoviePy 1.0.3
+imageio-ffmpeg==0.4.9

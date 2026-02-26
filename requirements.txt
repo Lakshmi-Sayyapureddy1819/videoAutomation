@@ -10,3 +10,5 @@ python-dotenv
 openai
 elevenlabs
 gunicorn; sys_platform != 'win32'
+transformers
+decord

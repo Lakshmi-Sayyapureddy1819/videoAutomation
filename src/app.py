@@ -1,10 +1,11 @@
 import streamlit as st
 import os
-from scout import get_youtube_links, download_video, check_youtube
+from scout import get_youtube_links, download_video, check_youtube, get_best_visual_source
 from processor import analyze_frames, trim_final_video, check_runpod
 from prompt_tuner import tune_script_for_search, check_openai, generate_narration_script
 from voiceover import generate_voiceover_openai
 from voice_engine import generate_voiceover as generate_voiceover_elevenlabs
+from script_processor import rewrite_for_visuals
 from script_engine import expand_script
 from cloud_worker import run_task_on_cloud, ping_runpod, terminate_runpod, cleanup_cloud_files, render_video_on_cloud
 
@@ -106,6 +107,11 @@ with st.expander("🌿 Need inspiration? View Natural Prompts"):
     - **Beach:** Vibrant sunset over a tropical beach, waves crashing on the sand, palm trees.
     - **Desert:** Wide angle shot of red sand dunes in the desert, wind blowing sand.
     - **Underwater:** Coral reef teeming with colorful fish, clear blue water, sunlight shafts.
+    - **Waterfall:** Majestic waterfall cascading down a cliff, mist rising, lush green jungle.
+    - **River:** Calm river flowing through a meadow at sunrise, reflection of trees in the water.
+    - **Rain:** Heavy rain falling on green leaves, macro shot, moody atmosphere.
+    - **Snow:** Winter forest covered in fresh snow, snowflakes falling gently, silent and peaceful.
+    - **Canyon:** Grand Canyon landscape, red rocks, deep blue sky, cinematic pan.
     """)
 
 prompt = st.text_input("Describe the scenes you want (or paste your idea):", "Cinematic views of ancient Rome")
@@ -167,10 +173,15 @@ if st.button("1. Plan & Fetch Scenes"):
                 transition = "fade"
                 emotion = "neutral"
 
-            st.write(f"🎞️ **Scene {i+1}/{num_clips}:** '{scene_desc[:40]}...' | 🧠 Mood: {emotion.upper()} | 🎬 FX: {transition}")
-            links = get_youtube_links(scene_desc, limit=1)
+            st.write(f"🎞️ **Scene {i+1}/{num_clips}:** '{scene_desc[:40]}...'")
+            
+            # Rewrite prompt for better visual search
+            visual_query = rewrite_for_visuals(scene_desc)
+            st.write(f"   ↳ 🧠 Rewritten Query: {visual_query}")
+            
+            links, source_type = get_best_visual_source(visual_query, limit=1)
             if not links:
-                st.warning(f"No result for scene {i+1}. (Check internet or set YOUTUBE_API_KEY)")
+                st.warning(f"No result for scene {i+1} from any source.")
                 continue
             
             prog_bar = st.progress(0, text="Processing...")
@@ -200,9 +211,10 @@ if st.button("1. Plan & Fetch Scenes"):
                         "name": os.path.basename(path), 
                         "desc": scene_desc, 
                         "url": links[0],
-                        "transition": transition
+                        "transition": transition,
+                        "source": source_type
                     })
-                    st.write(f"✔️ Matched at {ts:.1f}s")
+                    st.write(f"✔️ Matched at {ts:.1f}s from **{source_type}**")
                 prog_bar.empty()
             except Exception as e:
                 st.warning(f"Scene {i+1} failed: {e}")
@@ -266,8 +278,8 @@ if st.session_state.doc_state == "review":
         try:
             doc_audio = st.session_state.doc_data.get("audio")
             subs = script_for_video.strip() if add_subtitles and script_for_video.strip() else None
-            # Pass the 3-part tuple: path, start_time, transition
-            winning_segments = [(c["path"], c["start"], c.get("transition", "fade")) for c in edited_clips]
+            # Pass the list of dicts directly to the processor
+            winning_segments = edited_clips
             srt_path = os.path.abspath(os.path.join("data", "output", "documentary_subtitles.srt"))
             
             if render_cloud and enable_runpod:
@@ -301,7 +313,7 @@ if st.session_state.doc_state == "review":
                 
                 st.session_state.doc_final_video = final_path
                 st.session_state.doc_state = "complete"
-                success = True
+                success = os.path.exists(final_path)
         except Exception as e:
             st.error(f"Stitching failed: {e}")
         
@@ -310,22 +322,35 @@ if st.session_state.doc_state == "review":
 
 if st.session_state.doc_state == "complete":
     st.divider()
-    st.subheader("🍿 Final Documentary Ready")
-    final_path = st.session_state.doc_final_video
-    doc_audio = st.session_state.doc_data.get("audio")
-    srt_path = os.path.abspath(os.path.join("data", "output", "documentary_subtitles.srt"))
-    
-    st.write(f"**Location:** `{final_path}`")
-    st.video(final_path)
-    
-    safe_name = "".join(c for c in st.session_state.doc_data.get("source_text", "doc") if c.isalnum() or c in " -_").strip()[:30]
-    
-    with open(final_path, "rb") as f:
-        st.download_button("💾 Download Video (MP4)", f, file_name=f"vidrush_{safe_name}.mp4", key="dl_doc_final", mime="video/mp4")
-    
-    if st.button("🔄 Start New Documentary"):
-        st.session_state.doc_state = "idle"
-        st.rerun()
+    final_path = st.session_state.get("doc_final_video")
+
+    if final_path and os.path.exists(final_path):
+        st.success("✨ Production Complete!")
+        
+        # Create two columns for a professional layout
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            st.subheader("📺 Final Preview")
+            # This renders the video player directly in the browser
+            st.video(final_path) 
+            
+        with col2:
+            st.subheader("📥 Export")
+            safe_name = "".join(c for c in st.session_state.doc_data.get("source_text", "doc") if c.isalnum() or c in " -_").strip()[:30]
+            with open(final_path, "rb") as file:
+                st.download_button(
+                    label="Download MP4",
+                    data=file,
+                    file_name=f"VidRush_{safe_name}.mp4",
+                    mime="video/mp4"
+                )
+            if st.button("🔄 Start New Documentary"):
+                st.session_state.doc_state = "idle"
+                st.rerun()
+        st.write("📂 **Output Location:**", final_path)
+    else:
+        st.error("❌ Render failed. Check the RunPod terminal for logs.")
 
 
 st.divider()
@@ -536,18 +561,33 @@ if st.session_state.gen_vid_state == "review":
 
 if st.session_state.gen_vid_state == "complete":
     st.divider()
-    st.subheader("🍿 Final Video Ready")
-    final_path = st.session_state.gen_vid_final_video
-    st.write(f"**Location:** `{final_path}`")
-    st.video(final_path)
-    
-    safe_name = "".join(c for c in st.session_state.gen_vid_data.get("prompt", "video") if c.isalnum() or c in " -_").strip()[:30]
-    with open(final_path, "rb") as f:
-        st.download_button("💾 Download MP4", f, file_name=f"vidrush_{safe_name}.mp4", key="dl_gen_final", mime="video/mp4")
+    final_path = st.session_state.get("gen_vid_final_video")
+
+    if final_path and os.path.exists(final_path):
+        st.success("✨ Production Complete!")
         
-    if st.button("🔄 Create Another Video"):
-        st.session_state.gen_vid_state = "idle"
-        st.rerun()
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            st.subheader("📺 Final Preview")
+            st.video(final_path) 
+            
+        with col2:
+            st.subheader("📥 Export")
+            safe_name = "".join(c for c in st.session_state.gen_vid_data.get("prompt", "video") if c.isalnum() or c in " -_").strip()[:30]
+            with open(final_path, "rb") as file:
+                st.download_button(
+                    label="Download MP4",
+                    data=file,
+                    file_name=f"VidRush_{safe_name}.mp4",
+                    mime="video/mp4"
+                )
+            if st.button("🔄 Create Another Video"):
+                st.session_state.gen_vid_state = "idle"
+                st.rerun()
+        st.write("📂 **Output Location:**", final_path)
+    else:
+        st.error("❌ Render failed. Check the RunPod terminal for logs.")
 
 # --- NEW SECTION: Upload & Analyze ---
 st.divider()

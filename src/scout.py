@@ -2,7 +2,9 @@ import os
 import yt_dlp
 import platform
 from googleapiclient.discovery import build
+import requests
 from dotenv import load_dotenv
+from internetarchive import search_items
 
 # Project root: one level up from src/
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -15,6 +17,10 @@ else:
 
 load_dotenv()
 API_KEY = os.getenv("YOUTUBE_API_KEY")
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
+PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
+COVERR_API_KEY = os.getenv("COVERR_API_KEY")
+UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
 
 USED_VIDEO_IDS = []
 
@@ -98,6 +104,158 @@ def get_youtube_links(query, limit=2):
         print(f"❌ Search failed for '{query}': {e}")
         return []
 
+def search_pexels(query, limit=1):
+    """Searches Pexels for videos."""
+    if not PEXELS_API_KEY:
+        return []
+    try:
+        headers = {"Authorization": PEXELS_API_KEY}
+        url = f"https://api.pexels.com/videos/search?query={query}&per_page={limit}&orientation=landscape"
+        res = requests.get(url, headers=headers, timeout=10).json()
+        # Return the highest quality link
+        links = []
+        for v in res.get('videos', []):
+            if v.get('video_files'):
+                best_file = max(v['video_files'], key=lambda x: x.get('width', 0))
+                links.append(best_file['link'])
+        return links
+    except Exception as e:
+        print(f"⚠️ Pexels API failed: {e}")
+        return []
+
+def search_pixabay(query, limit=1):
+    """Searches Pixabay for videos."""
+    if not PIXABAY_API_KEY:
+        return []
+    try:
+        url = f"https://pixabay.com/api/videos/?key={PIXABAY_API_KEY}&q={query}&per_page={limit}&video_type=film&orientation=horizontal"
+        res = requests.get(url, timeout=10).json()
+        # Prefer large resolution
+        links = []
+        for v in res.get('hits', []):
+            if v.get('videos'):
+                if 'large' in v['videos']: links.append(v['videos']['large']['url'])
+                elif 'medium' in v['videos']: links.append(v['videos']['medium']['url'])
+        return links
+    except Exception as e:
+        print(f"⚠️ Pixabay API failed: {e}")
+        return []
+
+def search_coverr(query, limit=1):
+    """Searches Coverr for high-quality cinematic B-roll."""
+    if not COVERR_API_KEY:
+        return []
+    try:
+        # Note: Coverr's free API might be limited. This is a sample structure.
+        url = f"https://api.coverr.co/videos?query={query}&api_key={COVERR_API_KEY}"
+        res = requests.get(url, timeout=10).json()
+        return [v['urls']['mp4'] for v in res.get('hits', [])[:limit]]
+    except Exception as e:
+        print(f"⚠️ Coverr API failed: {e}")
+        return []
+
+def search_unsplash_photo(query, limit=1):
+    """Fallback to a high-res photo for Ken Burns effect if no video is found."""
+    if not UNSPLASH_ACCESS_KEY:
+        return []
+    try:
+        url = f"https://api.unsplash.com/search/photos?query={query}&per_page={limit}&client_id={UNSPLASH_ACCESS_KEY}"
+        res = requests.get(url, timeout=10).json()
+        # Return the full resolution URL
+        return [p['urls']['full'] for p in res.get('results', [])]
+    except Exception as e:
+        print(f"⚠️ Unsplash API failed: {e}")
+        return []
+
+def search_nasa(query, limit=1):
+    """Searches NASA Image and Video Library (Great for space/science)."""
+    try:
+        url = "https://images-api.nasa.gov/search"
+        params = {
+            "q": query,
+            "media_type": "video",
+            "page_size": limit
+        }
+        res = requests.get(url, params=params, timeout=10).json()
+        links = []
+        for item in res.get('collection', {}).get('items', []):
+            href = item.get('href')
+            if href:
+                try:
+                    # NASA returns a collection JSON that lists the actual video files
+                    media_res = requests.get(href, timeout=5).json()
+                    for m in media_res:
+                        # Prefer original quality or standard mp4
+                        if m.endswith("~orig.mp4"):
+                            links.append(m)
+                            break
+                        elif m.endswith(".mp4"):
+                            links.append(m)
+                            break
+                except Exception:
+                    pass
+        return links
+    except Exception as e:
+        print(f"⚠️ NASA API failed: {e}")
+        return []
+
+def search_internet_archive(query, limit=1):
+    """Searches Internet Archive for public domain footage (Great for history)."""
+    try:
+        base_url = "https://archive.org/advancedsearch.php"
+        # Construct query for movies/videos
+        q = f"{query} AND mediatype:(movies)"
+        params = {
+            "q": q,
+            "fl[]": "identifier",
+            "rows": limit,
+            "output": "json"
+        }
+        res = requests.get(base_url, params=params, timeout=10).json()
+        docs = res.get('response', {}).get('docs', [])
+        results = []
+        for doc in docs:
+            identifier = doc['identifier']
+            results.append(f"https://archive.org/download/{identifier}/{identifier}.mp4")
+        return results
+    except Exception as e:
+        print(f"⚠️ Internet Archive failed: {e}")
+        return []
+
+def get_best_visual_source(query, limit=1):
+    """
+    Three-Tier Fallback Strategy to find the best video source.
+    Returns a tuple: (list_of_links, source_name)
+    The order is optimized for client-grade, distraction-free content.
+    """
+    # Tier 1: Historical & Scientific (Highest accuracy for documentaries)
+    if any(k in query.lower() for k in ["history", "archive", "war", "1920s", "1940s", "1950s", "1960s"]):
+        links = search_internet_archive(query, limit=limit)
+        if links: return links, "internet_archive"
+    if any(k in query.lower() for k in ["nasa", "space", "rocket", "science"]):
+        links = search_nasa(query, limit=limit)
+        if links: return links, "nasa"
+
+    # Tier 2: High-Quality Cinematic Stock
+    links = search_coverr(query, limit=limit)
+    if links: return links, "coverr"
+    
+    links = search_pexels(query, limit=limit)
+    if links: return links, "pexels"
+
+    # Tier 3: General Stock & YouTube Fallback
+    links = search_pixabay(query, limit=limit)
+    if links: return links, "pixabay"
+
+    links = get_youtube_links(query, limit=limit)
+    if links: return links, "youtube"
+
+    # Final Fallback: High-Res Photo for Ken Burns effect
+    print("⚠️ No video found. Falling back to high-resolution photo search...")
+    photo_links = search_unsplash_photo(query, limit=limit)
+    if photo_links: return photo_links, "unsplash_photo"
+
+    return [], None
 
 def download_video(url, progress_callback=None):
     """Download a YouTube video to data/raw_videos. Returns local file path. Skips download if already present."""

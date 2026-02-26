@@ -12,7 +12,7 @@ runpod.api_key = os.getenv("RUNPOD_API_KEY")
 
 def ping_runpod():
     """Checks if the RunPod Pod is reachable."""
-    pod_id = os.getenv("RUNPOD_POD_ID", "60m4obatnbnwgy")
+    pod_id = os.getenv("RUNPOD_POD_ID", "mw31zouly6drzw")
     if not pod_id or pod_id.startswith("your_"):
         return False, "POD_ID not set in .env"
     
@@ -32,7 +32,7 @@ def render_video_on_cloud(segments, audio_path, subtitle_text):
     Sends the Edit Decision List to the Pod for rendering.
     segments: list of {'url': str, 'start': float}
     """
-    pod_id = os.getenv("RUNPOD_POD_ID", "60m4obatnbnwgy")
+    pod_id = os.getenv("RUNPOD_POD_ID", "mw31zouly6drzw")
     if not pod_id: return None, "POD_ID not set"
     
     api_url = f"https://{pod_id}-8000.proxy.runpod.net/render"
@@ -61,7 +61,7 @@ def run_task_on_cloud(video_url=None, prompt=None, file_path=None):
     Supports both Direct Pod Connection and Serverless Endpoint.
     """
     # --- OPTION 1: Direct Pod Connection (Persistent GPU) ---
-    pod_id = os.getenv("RUNPOD_POD_ID", "60m4obatnbnwgy")
+    pod_id = os.getenv("RUNPOD_POD_ID", "mw31zouly6drzw")
     if pod_id and not pod_id.startswith("your_"):
         # Construct the proxy URL for the pod (Port 8000)
         # Format: https://{pod_id}-8000.proxy.runpod.net
@@ -170,3 +170,37 @@ def terminate_runpod():
         return res.status_code == 200, res.text
     except Exception as e:
         return False, str(e)
+
+def rank_on_cloud(candidates, prompt):
+    """
+    Sends a list of video candidates to RunPod for X-CLIP ranking.
+    """
+    pod_id = os.getenv("RUNPOD_POD_ID")
+    if not pod_id: return None
+    
+    api_url = f"https://{pod_id}-8000.proxy.runpod.net/rank"
+    
+    try:
+        response = requests.post(api_url, json={"candidates": candidates, "prompt": prompt}, timeout=10)
+        data = response.json()
+        
+        if "job_id" in data:
+            job_id = data["job_id"]
+            status_url = f"https://{pod_id}-8000.proxy.runpod.net/status/{job_id}"
+            
+            # Poll for results
+            start_time = time.time()
+            while time.time() - start_time < 300: # 5 min timeout
+                res = requests.get(status_url)
+                if res.status_code == 200:
+                    job = res.json()
+                    if job['status'] == 'completed':
+                        return job['results']
+                    if job['status'] == 'failed':
+                        return []
+                time.sleep(2)
+                
+        return []
+    except Exception as e:
+        print(f"Ranking Error: {e}")
+        return []

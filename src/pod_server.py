@@ -9,7 +9,6 @@ Commands:
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 import torch
-import open_clip
 import threading
 import uuid
 import time
@@ -17,20 +16,18 @@ import os
 import sys
 import json
 import yt_dlp
+import shutil
 
 # Ensure we can import from the same directory
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from processor import analyze_frames, trim_final_video
+from processor import trim_final_video
+from models.video_model import XClipHandler
 
 app = Flask(__name__)
 
-# --- PRE-LOAD MODEL (Saves ~45s per request & prevents timeouts) ---
-print("⏳ Loading CLIP Model on GPU...")
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="laion400m_e32", force_quick_gelu=True)
-model = model.to(device).eval()
-print("✅ Model Ready.")
+# --- PRE-LOAD X-CLIP MODEL ---
+xclip = XClipHandler(device="cuda" if torch.cuda.is_available() else "cpu")
 print("🎧 VidRush Pipeline Ready: /health, /analyze, /cleanup, /render (Whisper+GPU)")
 
 # --- JOB QUEUE (File-Based for Multi-Worker Support) ---
@@ -75,35 +72,33 @@ def download_video_direct(url, output_dir="/tmp/raw_videos"):
         print(f"Download error: {e}")
         return None
 
-def background_analyze(job_id, url, prompt, video_path, model, preprocess, device):
+def background_rank(job_id, candidates, prompt):
     """Runs analysis in background to avoid Cloudflare 524 timeouts."""
     try:
         job = get_job(job_id)
         job['status'] = 'processing'
         save_job(job_id, job)
         
-        # 1. Download (if URL provided and no path yet)
-        if url and not video_path:
-            video_path = download_video_direct(url)
-            
-        if not video_path or not os.path.exists(video_path):
-             job['status'] = 'failed'
-             job['error'] = "Download/Upload failed"
-             save_job(job_id, job)
-             return
+        text_emb = xclip.encode_text(prompt)
+        ranked_results = []
 
-        # 2. Analyze
-        timestamp = analyze_frames(video_path, prompt, model=model, preprocess=preprocess, device=device)
+        for cand in candidates:
+            # Download temp
+            path = download_video_direct(cand['url'], output_dir="/tmp/rank_cache")
+            if path:
+                vid_emb = xclip.encode_video(path)
+                if vid_emb is not None:
+                    score = xclip.compute_similarity(text_emb, vid_emb)
+                    ranked_results.append({**cand, "score": score})
+                os.remove(path) # Cleanup immediately
         
-        # 3. Cleanup
-        if os.path.exists(video_path):
-            try: os.remove(video_path)
-            except: pass
-            
+        # Sort by score
+        ranked_results.sort(key=lambda x: x['score'], reverse=True)
+
         job['status'] = 'completed'
-        job['timestamp'] = timestamp
+        job['results'] = ranked_results
         save_job(job_id, job)
-        print(f"✅ Job {job_id} finished: {timestamp}s")
+        print(f"✅ Job {job_id} finished ranking {len(candidates)} clips.")
         
     except Exception as e:
         import traceback
@@ -123,38 +118,27 @@ def job_status(job_id):
     if not job: return jsonify({"error": "Job not found"}), 404
     return jsonify(job)
 
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    prompt = None
-    video_path = None
-    url = None
+@app.route('/rank', methods=['POST'])
+def rank_videos():
+    """
+    Receives a list of candidate video URLs and a prompt.
+    Downloads them, ranks them using X-CLIP, and returns the best ones.
+    """
+    data = request.json
+    prompt = data.get('prompt')
+    candidates = data.get('candidates', []) # List of {url, source, id...}
     
-    # Check if it's a JSON request (YouTube URL)
-    if request.is_json:
-        data = request.json
-        url = data.get('url')
-        prompt = data.get('prompt')
-    # Check if it's a File Upload (Multipart)
-    elif 'file' in request.files:
-        file = request.files['file']
-        prompt = request.form.get('prompt')
-        if file:
-            filename = secure_filename(file.filename)
-            video_path = os.path.join("/tmp", filename)
-            print(f"📂 Receiving upload: {filename}")
-            file.save(video_path)
+    if not prompt or not candidates:
+        return jsonify({"error": "Missing prompt or candidates"}), 400
 
-    if not prompt:
-        return jsonify({"error": "Missing prompt"}), 400
-
-    print(f"🚀 Processing: {url if url else 'File Upload'} with prompt: {prompt}")
+    print(f"🚀 Ranking {len(candidates)} clips for prompt: {prompt}")
     
     # Start Async Job
     job_id = str(uuid.uuid4())
     job_data = {'status': 'queued', 'submitted_at': time.time()}
     save_job(job_id, job_data)
     
-    thread = threading.Thread(target=background_analyze, args=(job_id, url, prompt, video_path, model, preprocess, device))
+    thread = threading.Thread(target=background_rank, args=(job_id, candidates, prompt))
     thread.start()
     
     return jsonify({"job_id": job_id, "status": "queued"})

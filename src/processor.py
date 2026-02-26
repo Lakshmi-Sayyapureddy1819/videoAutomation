@@ -5,7 +5,7 @@ import PIL.Image
 if not hasattr(PIL.Image, 'ANTIALIAS'):
     PIL.Image.ANTIALIAS = PIL.Image.LANCZOS
 # Updated imports for MoviePy 1.0.3 compatibility
-from moviepy.editor import VideoFileClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip
+from moviepy.editor import VideoFileClip, ImageClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip
 from moviepy.video.fx.loop import loop
 from moviepy.audio.fx.audio_loop import audio_loop
 from moviepy.audio.fx.volumex import volumex
@@ -16,6 +16,8 @@ from moviepy.video.fx.colorx import colorx
 
 import subprocess
 import tempfile
+import torch
+from transformers import AutoProcessor, AutoModel
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "data", "output")
@@ -23,6 +25,62 @@ OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "data", "output")
 
 def _ensure_output_dir():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Load model globally to keep it in the RTX 4090 VRAM
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model_name = "microsoft/xclip-base-patch32"
+try:
+    processor = AutoProcessor.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(model_name).to(device)
+except Exception as e:
+    print(f"⚠️ Failed to load X-CLIP model: {e}")
+    processor = None
+    model = None
+
+def calculate_xclip_score(video_path, visual_prompt):
+    """
+    Analyzes a video's content and returns a similarity score (0.0 to 1.0) 
+    compared to the visual prompt.
+    """
+    if model is None or processor is None:
+        return 0.0
+        
+    try:
+        import cv2
+        # 1. Extract 16 frames evenly across the video
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames < 16: return 0.0
+        
+        indices = np.linspace(0, total_frames - 1, 16).astype(int)
+        frames = []
+        for idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if ret:
+                frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        cap.release()
+
+        # 2. Process video and text for X-CLIP
+        inputs = processor(
+            text=[visual_prompt],
+            videos=list(frames),
+            return_tensors="pt",
+            padding=True
+        ).to(device)
+
+        # 3. Calculate Similarity Score
+        with torch.no_grad():
+            outputs = model(**inputs)
+            # Normalize and get cosine similarity
+            logits_per_video = outputs.logits_per_video  
+            score = torch.sigmoid(logits_per_video).item()
+            
+        return score
+
+    except Exception as e:
+        print(f"⚠️ X-CLIP Error on {video_path}: {e}")
+        return 0.0
 
 
 def script_to_srt(script: str, duration_sec: float) -> str:
@@ -93,6 +151,16 @@ def apply_ai_transition(clip, transition_type, duration=0.5):
     # Default: Standard smooth crossfade
     return clip.crossfadein(duration)
 
+def apply_ken_burns(image_path, duration=10, output_size=(1920, 1080)):
+    """Creates a slow cinematic zoom from a static image."""
+    clip = ImageClip(image_path).set_duration(duration)
+    
+    # Simple zoom-in effect (100% to 120% size over the duration)
+    clip = clip.resize(lambda t: 1 + 0.02 * t) 
+    clip = clip.set_position('center').resize(height=output_size[1])
+    
+    return clip
+
 def _has_nvenc():
     """Check if the installed FFmpeg supports h264_nvenc."""
     try:
@@ -148,51 +216,66 @@ def trim_final_video(segments, audio_path=None, output_path=None, segment_length
                 # Add fade buffer so crossfade doesn't eat the word
                 clip_duration = sentence_duration + fade_duration
                 
-                # Round-robin cycle through available video segments
                 vid_idx = i % len(segments)
                 segment_data = segments[vid_idx]
-                if len(segment_data) == 3:
-                    video_file, start_ts, transition_type = segment_data
-                else:
-                    video_file, start_ts, transition_type = segment_data[0], segment_data[1], "fade"
+                video_file = segment_data['path']
+                transition_type = segment_data.get('transition', 'fade')
+                source_type = segment_data.get('source', 'youtube')
                 
+                # Handle image source for Ken Burns effect
+                if source_type == 'unsplash_photo':
+                    sub = apply_ken_burns(video_file, duration=clip_duration)
+                    sub = apply_ai_transition(sub, transition_type, fade_duration)
+                    clips.append(sub)
+                    continue
+
+                # Standard video processing
+                start_ts = segment_data['start']
                 video = VideoFileClip(video_file)
-                safe_duration = max(0, video.duration - 0.1)
                 
-                # Ensure we don't go past end of file
-                if start_ts + clip_duration > safe_duration:
-                    start_ts = max(0, safe_duration - clip_duration)
+                # Source-specific safety buffers
+                if source_type == "youtube":
+                    start_ts = max(start_ts, 15.0) # Skip intro
+                    if start_ts + clip_duration > video.duration - 20.0: # Avoid outro
+                        start_ts = max(15.0, video.duration - 20.0 - clip_duration)
+                else: # pexels, pixabay
+                    if start_ts + clip_duration > video.duration - 2.0: # Safety buffer
+                        start_ts = max(0, video.duration - 2.0 - clip_duration)
                 
                 sub = video.subclip(start_ts, start_ts + clip_duration)
                 
                 if mute_original: sub = sub.without_audio()
                 if crop_headers:
                     w, h = sub.size
-                    # Professional Scaling & Watermark Removal
-                    sub = sub.crop(y1=h*0.1, y2=h*0.85) # Remove top 10%, bottom 15%
-                    
-                    # Force 16:9 (1920x1080)
+                    if source_type == "youtube":
+                        sub = sub.crop(y1=h*0.1, y2=h*0.85) # Aggressive crop for YouTube
                     sub = sub.resize(height=1080)
                     if sub.w > 1920: sub = sub.crop(x_center=sub.w/2, width=1920)
                     else: sub = sub.resize(width=1920)
                 
-                # --- APPLY AI SMART TRANSITION ---
                 sub = apply_ai_transition(sub, transition_type, fade_duration)
                 clips.append(sub)
 
         # --- STANDARD LOGIC (Fixed Segment Length) ---
         else:
             for segment_data in segments:
-                if len(segment_data) == 3: video_file, start_ts, transition_type = segment_data
-                else: video_file, start_ts, transition_type = segment_data[0], segment_data[1], "fade"
-                
-                # De-duplication check
+                video_file = segment_data['path']
+                start_ts = segment_data['start']
+                transition_type = segment_data.get('transition', 'fade')
+                source_type = segment_data.get('source', 'youtube')
+
                 if video_file in seen_files: continue
                 seen_files.add(video_file)
 
+                # Handle image source for Ken Burns effect
+                if source_type == 'unsplash_photo':
+                    sub = apply_ken_burns(video_file, duration=segment_length_sec)
+                    sub = apply_ai_transition(sub, transition_type, fade_duration)
+                    clips.append(sub)
+                    continue
+
                 video = VideoFileClip(video_file)
-                safe_duration = max(0, video.duration - 0.1)
-                end_ts = min(start_ts + segment_length_sec, safe_duration)
+                end_ts = min(start_ts + segment_length_sec, video.duration)
                 if start_ts >= end_ts:
                     start_ts = max(0, end_ts - segment_length_sec)
                 
@@ -200,15 +283,13 @@ def trim_final_video(segments, audio_path=None, output_path=None, segment_length
                 if mute_original: sub = sub.without_audio()
                 if crop_headers:
                     w, h = sub.size
-                    # Professional Scaling & Watermark Removal
-                    sub = sub.crop(y1=h*0.1, y2=h*0.85) # Remove top 10%, bottom 15%
-                    
-                    # Force 16:9 (1920x1080)
+                    if source_type == "youtube":
+                        sub = sub.crop(y1=h*0.1, y2=h*0.85) # Aggressive crop for YouTube
+
                     sub = sub.resize(height=1080)
                     if sub.w > 1920: sub = sub.crop(x_center=sub.w/2, width=1920)
                     else: sub = sub.resize(width=1920)
                 
-                # --- APPLY AI SMART TRANSITION ---
                 sub = apply_ai_transition(sub, transition_type, fade_duration)
                 clips.append(sub)
 
@@ -405,7 +486,7 @@ def check_runpod() -> tuple[bool, str]:
     except Exception:
         pass
     import os
-    endpoint = os.environ.get("RUNPOD_ENDPOINT_ID") or os.environ.get("RUNPOD_POD_ID", "60m4obatnbnwgy")
+    endpoint = os.environ.get("RUNPOD_ENDPOINT_ID") or os.environ.get("RUNPOD_POD_ID", "mw31zouly6drzw")
     if not endpoint or str(endpoint).strip().startswith("your_"):
         return False, "Not configured (set RUNPOD_POD_ID or ENDPOINT_ID in .env)"
     return True, "Configured"
