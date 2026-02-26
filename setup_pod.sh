@@ -13,6 +13,6 @@ apt-get update && apt-get install -y ffmpeg libsm6 libxext6 libgl1-mesa-glx
 # 2. Install Python Dependencies
 echo "📦 Installing Python Libraries..."
 pip install --upgrade pip
-pip install vidgear openai-whisper yt-dlp moviepy opencv-python torch open_clip_torch openai elevenlabs flask python-dotenv transformers decord
+pip install -r src/requirements.txt
 
 echo "✅ Setup Complete! You can now run: python src/pod_server.py"

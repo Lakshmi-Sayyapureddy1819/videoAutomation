@@ -1,7 +1,7 @@
 # --- Web & Infrastructure ---
 streamlit
 flask
-gunicorn
+gunicorn; sys_platform != 'win32'
 python-dotenv
 requests
 gevent
@@ -14,12 +14,14 @@ open_clip_torch
 transformers
 openai-whisper
 openai
+decord
 faiss-cpu           # Changed from faiss-gpu to fix build error
 
 # --- Search & Stock APIs ---
 google-api-python-client
 elevenlabs
 runpod
+internetarchive
 
 # --- Video Processing ---
 moviepy==1.0.3      

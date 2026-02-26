@@ -4,7 +4,6 @@ import platform
 from googleapiclient.discovery import build
 import requests
 from dotenv import load_dotenv
-from internetarchive import search_items
 
 # Project root: one level up from src/
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -13,9 +12,9 @@ if platform.system() == "Windows":
     RAW_VIDEOS_DIR = os.path.join(_PROJECT_ROOT, "data", "raw_videos")
     VAULT_DIR = os.path.join(_PROJECT_ROOT, "data", "vault")
 else:
-    # Change from /tmp to workspace for persistence
-    RAW_VIDEOS_DIR = "/workspace/data/raw_videos"
-    VAULT_DIR = "/workspace/data/vault"
+    # Use project root for compatibility with Streamlit Cloud and RunPod
+    RAW_VIDEOS_DIR = os.path.join(_PROJECT_ROOT, "data", "raw_videos")
+    VAULT_DIR = os.path.join(_PROJECT_ROOT, "data", "vault")
 
 load_dotenv()
 API_KEY = os.getenv("YOUTUBE_API_KEY")

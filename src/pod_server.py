@@ -23,11 +23,15 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from processor import trim_final_video
 from models.video_model import XClipHandler
+from vector_db import VectorDB
 
 app = Flask(__name__)
 
-# --- PRE-LOAD X-CLIP MODEL ---
+# --- PRE-LOAD MODELS & DB ---
 xclip = XClipHandler(device="cuda" if torch.cuda.is_available() else "cpu")
+# The dimension (dim) must match the output of your X-CLIP model.
+# The base model outputs 512-dimensional vectors.
+vector_db = VectorDB(dim=512) 
 print("🎧 VidRush Pipeline Ready: /health, /analyze, /cleanup, /render (Whisper+GPU)")
 
 # --- JOB QUEUE (File-Based for Multi-Worker Support) ---
@@ -73,24 +77,59 @@ def download_video_direct(url, output_dir="/tmp/raw_videos"):
         return None
 
 def background_rank(job_id, candidates, prompt):
-    """Runs analysis in background to avoid Cloudflare 524 timeouts."""
+    """
+    Ranks videos using X-CLIP, with a VectorDB cache to avoid re-processing.
+    """
     try:
         job = get_job(job_id)
         job['status'] = 'processing'
         save_job(job_id, job)
         
         text_emb = xclip.encode_text(prompt)
-        ranked_results = []
+        if text_emb is None:
+            raise ValueError("Failed to encode prompt text.")
 
+        ranked_results = []
+        
+        # Build a quick lookup for existing URLs in the DB
+        url_to_idx = {meta['url']: i for i, meta in enumerate(vector_db.metadata)}
+        
+        new_items_added = False
         for cand in candidates:
-            # Download temp
-            path = download_video_direct(cand['url'], output_dir="/tmp/rank_cache")
-            if path:
-                vid_emb = xclip.encode_video(path)
-                if vid_emb is not None:
-                    score = xclip.compute_similarity(text_emb, vid_emb)
-                    ranked_results.append({**cand, "score": score})
-                os.remove(path) # Cleanup immediately
+            url = cand.get('url')
+            if not url:
+                continue
+
+            vid_emb = None
+            # --- Cache Check ---
+            if url in url_to_idx:
+                idx = url_to_idx[url]
+                vid_emb = vector_db.index.reconstruct(idx).reshape(1, -1)
+                print(f"⚡ Cache HIT for: {url}")
+            
+            # --- Process if not in cache ---
+            else:
+                print(f"🐌 Cache MISS for: {url}. Processing...")
+                path = download_video_direct(url, output_dir="/tmp/rank_cache")
+                if path:
+                    try:
+                        vid_emb = xclip.encode_video(path)
+                        if vid_emb is not None:
+                            # Add to DB for future requests
+                            vector_db.add_item(vid_emb, {'url': url})
+                            new_items_added = True
+                    finally:
+                        os.remove(path) # Cleanup immediately
+
+            # --- Compute Score ---
+            if vid_emb is not None:
+                score = xclip.compute_similarity(text_emb, vid_emb)
+                ranked_results.append({**cand, "score": score})
+
+        # Save the DB if we added new items
+        if new_items_added:
+            print("💾 Saving updated vector database...")
+            vector_db.save()
         
         # Sort by score
         ranked_results.sort(key=lambda x: x['score'], reverse=True)

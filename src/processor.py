@@ -31,7 +31,7 @@ def _ensure_output_dir():
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model_name = "microsoft/xclip-base-patch32"
 try:
-    processor = AutoProcessor.from_pretrained(model_name)
+    processor = AutoProcessor.from_pretrained(model_name, use_fast=False)
     model = AutoModel.from_pretrained(model_name).to(device)
 except Exception as e:
     print(f"⚠️ Failed to load X-CLIP model: {e}")

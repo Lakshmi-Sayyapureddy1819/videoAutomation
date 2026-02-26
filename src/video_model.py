@@ -8,7 +8,7 @@ class XClipHandler:
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         print(f"⏳ Loading X-CLIP ({model_name}) on {self.device}...")
         try:
-            self.processor = AutoProcessor.from_pretrained(model_name)
+            self.processor = AutoProcessor.from_pretrained(model_name, use_fast=False)
             self.model = AutoModel.from_pretrained(model_name).to(self.device)
             self.model.eval()
             print("✅ X-CLIP Ready.")
