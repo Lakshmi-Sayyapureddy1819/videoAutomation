@@ -13,6 +13,7 @@ from moviepy.video.fx.fadein import fadein
 from moviepy.video.fx.fadeout import fadeout
 from moviepy.video.fx.resize import resize
 from moviepy.video.fx.colorx import colorx
+from moviepy.video.fx.lum_contrast import lum_contrast
 
 import subprocess
 import tempfile
@@ -161,6 +162,11 @@ def apply_ken_burns(image_path, duration=10, output_size=(1920, 1080)):
     
     return clip
 
+def apply_historical_look(clip):
+    """Ages modern footage to match 1920s style."""
+    # Add warmth/sepia and boost contrast
+    return clip.fx(colorx, 1.2).fx(lum_contrast, lum=0, contrast=0.3)
+
 def _has_nvenc():
     """Check if the installed FFmpeg supports h264_nvenc."""
     try:
@@ -243,6 +249,10 @@ def trim_final_video(segments, audio_path=None, output_path=None, segment_length
                         start_ts = max(0, video.duration - 2.0 - clip_duration)
                 
                 sub = video.subclip(start_ts, start_ts + clip_duration)
+
+                # Apply Historical Look to modern sources
+                if source_type in ["pexels", "pixabay", "coverr"]:
+                    sub = apply_historical_look(sub)
                 
                 if mute_original: sub = sub.without_audio()
                 if crop_headers:
@@ -280,6 +290,11 @@ def trim_final_video(segments, audio_path=None, output_path=None, segment_length
                     start_ts = max(0, end_ts - segment_length_sec)
                 
                 sub = video.subclip(start_ts, end_ts)
+
+                # Apply Historical Look to modern sources
+                if source_type in ["pexels", "pixabay", "coverr"]:
+                    sub = apply_historical_look(sub)
+
                 if mute_original: sub = sub.without_audio()
                 if crop_headers:
                     w, h = sub.size

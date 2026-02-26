@@ -11,9 +11,11 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 if platform.system() == "Windows":
     RAW_VIDEOS_DIR = os.path.join(_PROJECT_ROOT, "data", "raw_videos")
+    VAULT_DIR = os.path.join(_PROJECT_ROOT, "data", "vault")
 else:
     # Change from /tmp to workspace for persistence
     RAW_VIDEOS_DIR = "/workspace/data/raw_videos"
+    VAULT_DIR = "/workspace/data/vault"
 
 load_dotenv()
 API_KEY = os.getenv("YOUTUBE_API_KEY")
@@ -21,6 +23,20 @@ PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
 COVERR_API_KEY = os.getenv("COVERR_API_KEY")
 UNSPLASH_ACCESS_KEY = os.getenv("UNSPLASH_ACCESS_KEY")
+
+def check_local_vault(visual_prompt):
+    """Check for manually uploaded perfect clips first."""
+    if not os.path.exists(VAULT_DIR):
+        os.makedirs(VAULT_DIR, exist_ok=True)
+    
+    # Simple keyword match in filename
+    query_words = visual_prompt.lower().split()
+    for file in os.listdir(VAULT_DIR):
+        if file.lower().endswith(('.mp4', '.mov')):
+            if any(w in file.lower() for w in query_words if len(w) > 3):
+                print(f"💎 Found manual override in Vault: {file}")
+                return os.path.join(VAULT_DIR, file)
+    return None
 
 USED_VIDEO_IDS = []
 
@@ -228,6 +244,21 @@ def get_best_visual_source(query, limit=1):
     Returns a tuple: (list_of_links, source_name)
     The order is optimized for client-grade, distraction-free content.
     """
+    # Tier 0: Local Vault (Highest Priority)
+    vault_match = check_local_vault(query)
+    if vault_match: return [vault_match], "local_vault"
+
+    # Tier 0: Local "Seed" Check (Manual Overrides)
+    # If a file exists in RAW_VIDEOS_DIR that matches the query keywords, use it first.
+    if os.path.exists(RAW_VIDEOS_DIR):
+        for filename in os.listdir(RAW_VIDEOS_DIR):
+            if filename.endswith(".mp4"):
+                # Simple keyword matching on filename
+                # e.g. query="steam engine", file="steam_engine_HD.mp4" -> Match
+                query_words = query.lower().split()
+                if any(w in filename.lower() for w in query_words if len(w) > 3):
+                    return [os.path.join(RAW_VIDEOS_DIR, filename)], "local_manual"
+
     # Tier 1: Historical & Scientific (Highest accuracy for documentaries)
     if any(k in query.lower() for k in ["history", "archive", "war", "1920s", "1940s", "1950s", "1960s"]):
         links = search_internet_archive(query, limit=limit)
@@ -259,6 +290,10 @@ def get_best_visual_source(query, limit=1):
 
 def download_video(url, progress_callback=None):
     """Download a YouTube video to data/raw_videos. Returns local file path. Skips download if already present."""
+    # Handle local file paths (from Vault or Seed)
+    if os.path.exists(url):
+        return url
+
     os.makedirs(RAW_VIDEOS_DIR, exist_ok=True)
     
     # Extract id so we can skip re-download

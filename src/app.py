@@ -257,7 +257,10 @@ if st.session_state.doc_state == "review":
             c1, c2 = st.columns([3, 1])
             with c1:
                 st.write(f"**Scene {i+1}:** {clip['desc']}")
-                st.caption(f"File: `{clip['name']}`")
+                
+                source_icon = "🏛️" if clip.get('source') == 'internet_archive' else "💎" if clip.get('source') == 'local_vault' else "📹"
+                st.caption(f"File: `{clip['name']}` | Source: {source_icon} **{clip.get('source', 'unknown').upper()}**")
+                
                 with st.expander("Preview Clip"):
                     st.video(clip["path"])
                     st.info(f"📝 **Scene Prompt:** {clip['desc']}")
