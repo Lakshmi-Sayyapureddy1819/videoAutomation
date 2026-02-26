@@ -15,4 +15,4 @@ data/
 models/
 .env
 .env.example/
-
+.streamlit/secrets.toml
