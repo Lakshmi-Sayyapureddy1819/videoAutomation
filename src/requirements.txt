@@ -5,6 +5,7 @@ gunicorn; sys_platform != 'win32'
 python-dotenv
 requests
 gevent
+setuptools
 
 # --- AI & Vision ---
 torch

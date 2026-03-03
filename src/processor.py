@@ -501,7 +501,7 @@ def check_runpod() -> tuple[bool, str]:
     except Exception:
         pass
     import os
-    endpoint = os.environ.get("RUNPOD_ENDPOINT_ID") or os.environ.get("RUNPOD_POD_ID", "mw31zouly6drzw")
+    endpoint = os.environ.get("RUNPOD_ENDPOINT_ID") or os.environ.get("RUNPOD_POD_ID", "7b13jxyyxtjt8f")
     if not endpoint or str(endpoint).strip().startswith("your_"):
         return False, "Not configured (set RUNPOD_POD_ID or ENDPOINT_ID in .env)"
     return True, "Configured"

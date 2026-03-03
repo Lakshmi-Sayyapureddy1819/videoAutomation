@@ -17,15 +17,17 @@ import sys
 import json
 import yt_dlp
 import shutil
+from dotenv import load_dotenv
 
 # Ensure we can import from the same directory
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from processor import trim_final_video
-from models.video_model import XClipHandler
+from video_model import XClipHandler
 from vector_db import VectorDB
 
 app = Flask(__name__)
+load_dotenv()
 
 # --- PRE-LOAD MODELS & DB ---
 xclip = XClipHandler(device="cuda" if torch.cuda.is_available() else "cpu")
