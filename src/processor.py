@@ -27,6 +27,24 @@ OUTPUT_DIR = os.path.join(_PROJECT_ROOT, "data", "output")
 def _ensure_output_dir():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+
+def _normalize_segment(segment):
+    if isinstance(segment, dict):
+        return {
+            "path": segment.get("path"),
+            "start": float(segment.get("start", 0)),
+            "transition": segment.get("transition", "fade"),
+            "source": segment.get("source", "youtube"),
+        }
+    if isinstance(segment, (list, tuple)) and len(segment) >= 2:
+        return {
+            "path": segment[0],
+            "start": float(segment[1]),
+            "transition": "fade",
+            "source": "youtube",
+        }
+    raise ValueError(f"Unsupported segment format: {segment!r}")
+
 # Load model globally to keep it in the RTX 4090 VRAM
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model_name = "microsoft/xclip-base-patch32"
@@ -223,7 +241,7 @@ def trim_final_video(segments, audio_path=None, output_path=None, segment_length
                 clip_duration = sentence_duration + fade_duration
                 
                 vid_idx = i % len(segments)
-                segment_data = segments[vid_idx]
+                segment_data = _normalize_segment(segments[vid_idx])
                 video_file = segment_data['path']
                 transition_type = segment_data.get('transition', 'fade')
                 source_type = segment_data.get('source', 'youtube')
@@ -268,7 +286,8 @@ def trim_final_video(segments, audio_path=None, output_path=None, segment_length
 
         # --- STANDARD LOGIC (Fixed Segment Length) ---
         else:
-            for segment_data in segments:
+            for raw_segment in segments:
+                segment_data = _normalize_segment(raw_segment)
                 video_file = segment_data['path']
                 start_ts = segment_data['start']
                 transition_type = segment_data.get('transition', 'fade')
